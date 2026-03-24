@@ -71,13 +71,36 @@ export type TaskStatus =
 
 export interface TaskSubmitParams {
   skill: string
+  /** Code, text, or description of work. For file uploads, use uploadId from tasks.upload(). */
   input: string
+  /** Repo URL to clone and process (alternative to input). */
+  repoUrl?: string
   description?: string
   priority?: "standard" | "priority" | "urgent"
   region?: string
   minTrustScore?: number
   quoteId?: string
   webhook?: string
+  /** Idempotency key -- prevents duplicate tasks on retry. SDK auto-generates if not provided. */
+  idempotencyKey?: string
+  /** Maximum cost in USD. Task is rejected if quote exceeds this. */
+  maxCostUsd?: number
+}
+
+export interface TaskListParams extends PaginationParams {
+  status?: TaskStatus
+  skill?: string
+  /** ISO date string -- only tasks created after this date */
+  since?: string
+  /** ISO date string -- only tasks created before this date */
+  until?: string
+}
+
+export interface FileUploadResult {
+  uploadId: string
+  filename: string
+  sizeBytes: number
+  r2Key: string
 }
 
 export interface Task {

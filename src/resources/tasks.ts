@@ -2,6 +2,7 @@ import type { HttpClient } from "../http.js"
 import type {
   Task,
   TaskSubmitParams,
+  TaskListParams,
   TaskResult,
   TaskWaitOptions,
   TaskEvent,
@@ -12,7 +13,9 @@ import type {
   PaginatedList,
   PaginationParams,
   Deliverable,
+  FileUploadResult,
 } from "../types.js"
+import { RateLimitError } from "../errors.js"
 import { TaskError, TimeoutError, NoWorkersError, InsufficientFundsError } from "../errors.js"
 
 const DEFAULT_POLL_INTERVAL_MS = 3_000
@@ -21,18 +24,69 @@ const DEFAULT_TIMEOUT_MS = 300_000 // 5 minutes
 export class TasksResource {
   constructor(private readonly http: HttpClient) {}
 
-  /** Submit a task for execution. Returns immediately with task ID and status. */
+  /**
+   * Submit a task for execution. Returns immediately with task ID and status.
+   * Supports idempotency keys (auto-generated if not provided) and budget limits.
+   */
   async submit(params: TaskSubmitParams): Promise<Task> {
+    // #4: Budget limit -- get quote first and reject if too expensive
+    if (params.maxCostUsd !== undefined) {
+      try {
+        const quote = await this.http.post<any>("/tasks/quote", {
+          body: { skillId: params.skill, slaTier: params.priority, region: params.region },
+        })
+        if (quote.maxChargeUsdc > params.maxCostUsd) {
+          throw new Error(
+            `Task would cost up to $${quote.maxChargeUsdc.toFixed(4)} which exceeds your budget limit of $${params.maxCostUsd.toFixed(4)}`
+          )
+        }
+      } catch (err) {
+        if ((err as Error).message.includes("budget limit")) throw err
+        // Quote failed -- proceed without budget check
+      }
+    }
+
+    // #3: Auto-generate idempotency key if not provided
+    const idempotencyKey = params.idempotencyKey || `sdk_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+
+    // #9: Support repo URL input
+    const inputPayload = params.repoUrl
+      ? JSON.stringify({ repoUrl: params.repoUrl, description: params.description || `Process repo: ${params.repoUrl}` })
+      : params.input
+
     const body: Record<string, unknown> = {
       skillId: params.skill,
-      inputEncrypted: params.input,
+      inputEncrypted: inputPayload,
       description: params.description,
       slaTier: params.priority,
       region: params.region,
       minTrustScore: params.minTrustScore,
       quoteId: params.quoteId,
+      idempotencyKey,
     }
-    return this.http.post<Task>("/tasks", { body })
+
+    return this.retryOnRateLimit(() => this.http.post<Task>("/tasks", { body }))
+  }
+
+  /**
+   * Upload a file (zip, tar.gz, or source) for task input.
+   * Returns an uploadId to pass as input to submit().
+   * #2: File upload support
+   */
+  async upload(file: Blob | Buffer | ArrayBuffer, filename: string): Promise<FileUploadResult> {
+    const body = file instanceof Blob ? file : new Blob([new Uint8Array(file instanceof ArrayBuffer ? file : (file as Buffer))])
+    const res = await fetch(`${(this.http as any).baseUrl}/uploads`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "x-filename": filename,
+        "Authorization": `Bearer ${(this.http as any).apiKey}`,
+      },
+      body,
+    })
+    if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
+    const data = await res.json() as any
+    return data.data || data
   }
 
   /** Get a task by ID. */
@@ -45,8 +99,8 @@ export class TasksResource {
     return this.http.get(`/tasks/${taskId}/status`)
   }
 
-  /** List tasks with optional pagination. */
-  async list(params?: PaginationParams): Promise<PaginatedList<Task>> {
+  /** List tasks with optional filtering by status, skill, date range. */
+  async list(params?: TaskListParams): Promise<PaginatedList<Task>> {
     return this.http.get<PaginatedList<Task>>("/tasks", { query: params as any })
   }
 
@@ -63,6 +117,11 @@ export class TasksResource {
   /** Acknowledge an action_required event (proceed). */
   async acknowledge(taskId: string): Promise<void> {
     await this.http.post(`/tasks/${taskId}/acknowledge`)
+  }
+
+  /** Dispute a task result. Triggers review and may result in refund. */
+  async dispute(taskId: string, reason: string): Promise<void> {
+    await this.http.post(`/tasks/${taskId}/dispute`, { body: { reason } })
   }
 
   /**
@@ -202,6 +261,23 @@ export class TasksResource {
       acknowledge: () => this.acknowledge(taskId),
       cancel: () => this.cancel(taskId),
     }
+  }
+
+  /** Auto-retry on 429 with exponential backoff (#13) */
+  private async retryOnRateLimit<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn()
+      } catch (err) {
+        if (err instanceof RateLimitError && attempt < maxRetries) {
+          const delay = (err.retryAfter || Math.pow(2, attempt)) * 1000
+          await sleep(delay)
+          continue
+        }
+        throw err
+      }
+    }
+    throw new Error("Unreachable")
   }
 
   private async buildResult(task: Task): Promise<TaskResult> {

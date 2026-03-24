@@ -1,6 +1,6 @@
 {
   "name": "@authora/agentnet-sdk",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Official TypeScript/JavaScript SDK for AgentNet -- AI engineering work as a service.",
   "author": "AgentNet <sdk@authora.dev>",
   "license": "MIT",
