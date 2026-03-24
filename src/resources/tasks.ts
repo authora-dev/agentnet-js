@@ -73,8 +73,8 @@ export class TasksResource {
    * Returns an uploadId to pass as input to submit().
    * #2: File upload support
    */
-  async upload(file: Blob | Buffer | ArrayBuffer, filename: string): Promise<FileUploadResult> {
-    const body = file instanceof Blob ? file : new Blob([new Uint8Array(file instanceof ArrayBuffer ? file : (file as Buffer))])
+  async upload(file: Blob | ArrayBuffer | Uint8Array, filename: string): Promise<FileUploadResult> {
+    const body: Blob = file instanceof Blob ? file : new Blob([file] as BlobPart[])
     const res = await fetch(`${(this.http as any).baseUrl}/uploads`, {
       method: "POST",
       headers: {
